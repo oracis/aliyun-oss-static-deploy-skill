@@ -1,6 +1,6 @@
 name: aliyun-oss-static-deploy-skill
 display_name: 阿里云 OSS 静态站部署
-version: 1.1.0
+version: 1.1.1
 author: oracis
 category: 开发编程
 license: MIT
