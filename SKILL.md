@@ -6,8 +6,9 @@ summary: 把纯静态站点部署到阿里云 OSS：建桶、上传、静态托�
 license: MIT
 description: 把纯静态站点（dist/ 或 web/）部署到阿里云 OSS + 自定义域名 + HTTPS 证书，并打通 GitHub Actions 自动部署与证书自动续期。当用户说「推到阿里云 / 上线 / 部署到 OSS / 绑自定义域名 / 签 SSL 证书 / 配置 Actions 自动部署 / 静态站 HTTPS」时使用。
 agent_created: true
-version: 1.1.1
-category: 开发编程
+version: 1.1.4
+category: it-ops-security
+subCategories: [itops-devops, itops-config]
 platforms: [linux, windows, macos]
 ---
 
@@ -82,6 +83,12 @@ ACME 证书只有 90 天，脚本剩余 >30 天自动跳过；到期前重签并
 
 ## 4. GitHub Actions 自动部署
 
+**动手配之前先过一遍 4.5(1c) 的判断**：这条 CI 改了哪些文件、那些文件会进对外产物吗？
+如果答案是「不进」（典型：采集类 workflow 只写内部队列，而对外产物显式剔除了它），
+那它部署的是和上次一样的站点 —— **别配部署，去把 workflow 的部署步骤删掉**。
+2026-09-20 实测过一个配错方向的：那条 workflow 每天推 400+ 条未核实素材上公网，
+连跑 4 天全是 success，靠对比产物体积才发现。
+
 先查现状再动手，别猜（只能读名字，读不到值）：
 
 ```bash
@@ -97,6 +104,10 @@ for l in open(os.path.expanduser('~/.git-credentials'),encoding='utf-8'):
 curl --noproxy '*' -H "Authorization: Bearer $TOKEN" \
   https://api.github.com/repos/<owner>/<repo>/actions/{secrets,variables}
 ```
+
+**收尾别忘了反向清理**：部署步骤一旦从 workflow 里删掉，那两个 Secret 与两个
+Variable 就成了不再被使用的长期凭证。删掉它们（`DELETE /actions/secrets/<name>`、
+`DELETE /actions/variables/<name>`）—— 留着既不安全，也会让下一个人以为「CI 会自动部署」。
 
 - **Variables**（明文，直接 POST）：`OSS_BUCKET`、`OSS_REGION`。
 - **Secrets**：先 `GET /actions/secrets/public-key` 拿 `key_id` + 公钥，再用 PyNaCl `SealedBox` 加密后 PUT
@@ -144,6 +155,49 @@ python scripts/deploy_oss.py --bucket <桶> --region cn-hongkong --dir public \
 把对外那份加进 `.gitignore`（如 `public/`），避免哪天顺手 `git add -A` 把不带治理的
 中间产物推上去。
 
+**（1b）放进 Actions 的部署步骤，必须显式写死产物参数 —— 别用默认值**
+
+上一条的防线是「扫一眼排除清单再上传」，而**CI 里没有人会看输出**。
+2026-09-20 实测：一个 workflow 的构建与部署两步都用了默认参数
+
+```yaml
+- run: python scripts/build_static.py                          # 默认 --out dist，没加 --no-inbox
+- run: python scripts/deploy_oss.py --bucket $B --region $R    # 默认 --dir dist
+```
+
+于是它**每天把 400+ 条未核实素材的全文推上公网，连跑 4 天全是 success**。
+发现靠的是对比产物体积（CI 传的 `data.json` 525 KB，对外那份只有 174 KB），
+不是靠日志 —— 日志里那两行和正常部署长得一模一样。
+
+三条可操作的做法：
+
+1. **workflow 里不允许出现裸的 `build_static.py`**：产物目录与 `--no-inbox`
+   都写成字面量，宁可长也别省。想让两边约定永不漂移，就让 CI 调同一个编排器
+   （如 `release.py --only build,deploy`），而不是各写一遍参数。
+2. **在上传脚本里加硬闸门，而不是靠人记得**：读产物 `data.json` 的敏感字段
+   （未核实条数、密钥、内部路径），非空且没给显式的放行参数就拒绝上传。
+   注意让这个检查返回**三态**（0 干净 / 正数脏 / 读不出来）——
+   把「读不出来」也当 0 会把真 bug 吞成「看起来正常」。
+3. **给对外产物写一条语义断言进 CI**：线上 `inbox` 必须是 0 之类，
+   让「推错产物」变成红的，而不是等读者发现。
+
+**（1c）先问「这条 CI 到底该不该部署」，再谈怎么部署对**
+
+参数写对只是治标。更值得先问的是：**这条 CI 的产出，会上公网吗？**
+
+上面的例子里，那条 workflow 的职责是「采集原始素材」，而对外产物
+显式剔除了这些素材（`--no-inbox`）—— 也就是说它部署的是**和上次一模一样的站点**，
+纯属空转；真正的部署入口是本地那条发布链路，它自己就含 build + deploy。
+
+判据很简单：**看这条 CI 改了哪些文件**
+- 改的文件会进对外产物 → 才需要部署
+- 改的文件被对外产物排除 → 部署是空转，删掉更干净
+- 改的文件**不该**进对外产物，但产物没排除它 → 这是在推脏数据，最危险
+
+删掉空转的部署还有个附带好处：CI 不再需要长期挂着 OSS 凭证。
+（本例删掉部署后，仓库里那两个 Secret 与两个 Variable 一并清掉，
+少一份长期凭证的暴露面。）
+
 **（2）部署脚本里的「连通性探针」别写成 `read(400)`**
 
 只探前 400 字节然后打印「HTTP 200 400 字节」，日志读起来像首页只有 400 字节，
@@ -154,6 +208,32 @@ python scripts/deploy_oss.py --bucket <桶> --region cn-hongkong --dir public \
 
 dry-run 报 `AccessDenied ... must be addressed using the specified endpoint`
 = 桶不在这个 region，换地域重试即可，不是权限问题。先用 `--check` 列一遍账号下的桶。
+
+**（4）「线上 vs 本地」的漂移检测：网络失败不是内容差异**
+
+比本地产物与线上内容来决定「要不要重新部署」时，最容易写错的一点：
+把「取不到」当成「线上没有这个文件」。2026-09-20 实测踩到 ——
+一次瞬时失败让一个在线上的页面被判「缺失」，脚本就触发了一次没必要的部署
+（同一条 URL 手工一取就是 HTTP 200）。
+
+必须分三态，而且**只有明确 404 才算缺失**：
+
+| 结果 | 含义 | 处置 |
+|---|---|---|
+| `ok` | 取到了 | 比哈希 |
+| `missing` | **明确 404** | 算差异，需要部署 |
+| `error` | 超时/连接失败/5xx | **不参与判断**，只报告 |
+
+配套三条：
+- 404 **不重试**（没意义，只拖慢）；网络错误重试 2 次
+- 取不到的比例达到约 1/3 时直接停下报「大概率是网络或域名不对」，
+  别拿一堆没比出来的文件去部署
+- 报告里要分开写「内容不同」「线上缺失」「取不到」「线上多出来的」——
+  尤其最后一类：**部署不会删多余文件**，拿它触发部署等于每天白跑
+
+顺带一条同源教训：这类脚本的「有差异」判断要能区分
+「测试/预演」与「真跑」，而且 `--dry-run` 必须真的一个写请求都不发
+（见本节第 3 条最后那段）。
 
 ## 4.6 写一个语义校验脚本，别每次手敲 curl
 
@@ -273,6 +353,23 @@ python scripts/deploy_oss.py --bucket <桶> --dir dist --dry-run   # 只打印�
 - 覆盖同名对象前**自动备份**旧版本到 `~/.oss-deploy-backup/<桶>/<key>.<时间戳>`（`--no-backup` 可关）。
 - `--verify` 是回读 **md5 比对**，不是比字节数；再加 `--expect '某串'` 做语义标记断言。
 - `--dry-run` 会跳过回读校验（对象根本没上传，回读必然 404，不要误判为失败）。
+- **`--dry-run` 必须真的只读 —— 写完要数一遍写请求，别信输出。**
+  2026-09-20 实测一个 deploy 脚本：`--dry-run` 只保护了 upload 那一段，
+  而 Bucket Policy 的 PUT 跑在 dry_run 判断**之前**、无条件执行 ——
+  于是「只列出会传的文件，不真传」实际是「不传文件，但照样重设线上权限策略」。
+  同类：`--create` + `--dry-run` 桶不存在时会真的建桶。
+
+  这个 bug 的可恶之处在于**它只骗人、不报错**：调用方（如一个
+  `release.py --dry-run` 全链路预演）对外宣称「不写盘不上传」，
+  实际上每次预演都真的改了一遍线上配置。
+
+  排查手法：把「写操作」全部列出来（PUT/POST/DELETE/建桶/改策略/改权限），
+  逐个确认它在 dry-run 分支**之内**。上传那一段最容易检查到，
+  权限、策略、托管设置、CDN 刷新这些「顺手的收尾动作」最容易漏。
+
+  测试要**数写请求**（记下每个 method，断言 dry-run 时非 GET 数为 0），
+  而不是断言「打印了跳过」。打印一句「（跳过）」很容易，真发没发 PUT 才是事实。
+  反向也要钉一条：真跑时必须照发 —— 别为了「dry-run 干净」把正常路径一起废掉。
 
 `build_static.py`（零依赖，整理**对外产物**）：
 
