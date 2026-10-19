@@ -6,7 +6,7 @@ summary: 把纯静态站点部署到阿里云 OSS：建桶、上传、静态托�
 license: MIT
 description: 把纯静态站点（dist/ 或 web/）部署到阿里云 OSS + 自定义域名 + HTTPS 证书，并打通 GitHub Actions 自动部署与证书自动续期。当用户说「推到阿里云 / 上线 / 部署到 OSS / 绑自定义域名 / 签 SSL 证书 / 配置 Actions 自动部署 / 静态站 HTTPS」时使用。
 agent_created: true
-version: 1.1.4
+version: 1.1.6
 category: it-ops-security
 subCategories: [itops-devops, itops-config]
 platforms: [linux, windows, macos]
@@ -92,15 +92,10 @@ ACME 证书只有 90 天，脚本剩余 >30 天自动跳过；到期前重签并
 先查现状再动手，别猜（只能读名字，读不到值）：
 
 ```bash
-# ~/.git-credentials 每行形如 https://<user>:<token>@github.com
 # 坑：别假设 token 前缀是 gho_ —— 那是 gh 自己的 OAuth token；PAT 是 40 位裸串，
-# grep -o "gho_..." 会取到空值，后面所有请求 401 却看不出原因。用 python 取：
-TOKEN=$(python -c "
-import os,re
-for l in open(os.path.expanduser('~/.git-credentials'),encoding='utf-8'):
-    m=re.match(r'https://[^:]+:([^@]+)@github\.com', l.strip())
-    if m: print(m.group(1)); break
-")
+# grep -o "gho_..." 会取到空值，后面所有请求 401 却看不出原因。
+# 用 git credential 标准接口取（不直接读凭据存档文件）：
+TOKEN=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill | sed -n 's/^password=//p')
 curl --noproxy '*' -H "Authorization: Bearer $TOKEN" \
   https://api.github.com/repos/<owner>/<repo>/actions/{secrets,variables}
 ```
@@ -121,7 +116,7 @@ Variable 就成了不再被使用的长期凭证。删掉它们（`DELETE /actio
 **顺带一个本地 git 的坑**：`gh auth status` 经常是「未登录」，而全局配置里
 `credential.https://github.com.helper=!gh auth git-credential` 会让 `git push` 直接报
 `could not read Username ... terminal prompts disabled`。修法是给仓库加一条更局部的
-credential helper，让它回落到 `~/.git-credentials`：
+credential helper，让它回落到本机 credential store 凭据存档：
 
 ```bash
 git config credential.https://github.com.helper store   # 写进 .git/config，压过全局的 gh helper
