@@ -1,0 +1,48 @@
+#!/bin/sh
+# pre-commit：守住「脚本不许散失」。
+#   1. 仓库内 .py/.sh/.ps1/.mjs 未被 git 跟踪 → 本地能跑、换机就没了
+#   2. tmp/ 下出现上述脚本 → 临时目录被忽略，等于没入库
+# 启用（每个 clone 一次）：python scripts/install_hooks.py
+# 临时跳过（不推荐）：git commit --no-verify
+set -e
+
+PY="${PYTHON:-python}"
+if ! command -v "$PY" >/dev/null 2>&1; then
+    if command -v py >/dev/null 2>&1; then PY="py -3"
+    else echo "[pre-commit] 未找到 python，跳过脚本散失检查"; exit 0; fi
+fi
+cd "$(git rev-parse --show-toplevel)"
+
+$PY -X utf8 - <<'PYEOF'
+import os, subprocess, sys
+from pathlib import Path
+ROOT = Path.cwd(); TMP = ROOT / "tmp"
+EXTS = {".py", ".sh", ".ps1", ".mjs"}
+SKIP = {"__pycache__", ".git", "node_modules", ".workbuddy"}
+
+tracked = set(subprocess.run(["git", "ls-files", "-z"], capture_output=True,
+                             check=True).stdout.decode("utf-8", "replace").split("\0"))
+untracked = []
+for root, dirs, files in os.walk(ROOT):
+    rel_root = Path(root).relative_to(ROOT)
+    dirs[:] = [d for d in dirs if d not in SKIP and not (rel_root == Path(".") and d == "tmp")]
+    for fn in files:
+        if Path(fn).suffix in EXTS:
+            rel = Path(root, fn).relative_to(ROOT).as_posix()
+            if rel not in tracked:
+                untracked.append(rel)
+if untracked:
+    print("[pre-commit] FAIL 脚本未被 git 跟踪：" + ", ".join(untracked[:8]))
+    sys.exit(1)
+stray = []
+if TMP.is_dir():
+    for root, dirs, files in os.walk(TMP):
+        dirs[:] = [d for d in dirs if d not in SKIP]
+        for fn in files:
+            if Path(fn).suffix in EXTS:
+                stray.append(Path(root, fn).relative_to(ROOT).as_posix())
+if stray:
+    print("[pre-commit] FAIL tmp/ 下出现脚本（不会进仓库）：" + ", ".join(stray[:8]))
+    sys.exit(1)
+print("[pre-commit] OK：仓库脚本全部跟踪 / tmp 无脚本")
+PYEOF

@@ -1,0 +1,4 @@
+.githooks/pre-commit text eol=lf
+.githooks/post-commit text eol=lf
+.gitattributes text eol=lf
+scripts/install_hooks.py text eol=lf
